@@ -9,13 +9,15 @@ Created on Tue Oct 27 14:00:04 2020
 #%% import packages 
 import pandas as pd
 import numpy as np
-import datetime
-from sklearn.model_selection import StratifiedKFold
 import category_encoders as ce
 
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
-
+from sklearn.model_selection import RandomizedSearchCV, GridSearchCV
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier, BaggingClassifier, StackingClassifier
+from sklearn.model_selection import cross_val_score
+from xgboost import XGBClassifier
+from scipy.stats import reciprocal
 
 #%% read data
 train = pd.read_csv('train_values.csv')
@@ -28,6 +30,10 @@ numeric_recode = {'functional' : 1,
                   'non functional' : 2,
                   'functional needs repair' : 3
                   }
+
+cat_recode = {1 : 'functional',
+              2 : 'non functional',
+              3 : 'functional needs repair'}
 
 train_labels['status_group'] = train_labels.status_group.map(numeric_recode)
 
@@ -54,7 +60,7 @@ features = ['id',
 
 dta = dta[features]
 
-# dta['month_recorded'] = [i.month for i in pd.to_datetime(dta['date_recorded'])]
+#dta['month_recorded'] = [i.month for i in pd.to_datetime(dta['date_recorded'])]
 #tdiff = [pd.to_datetime("2014-01-01") - i for i in pd.to_datetime(dta['date_recorded'])]
 #dta['recorded_offset_days '] = [i.days for i in tdiff]
 # clean up text vars -- all text to lowercase
@@ -119,29 +125,20 @@ train = pd.DataFrame(imp.transform(train), columns = train.columns)
 train['construction_year'] = train['construction_year'].round(0)
 train['permit'] = train['permit'].round(0)
 
-#%% scale
-# from sklearn.preprocessing import StandardScaler
-
-# scaler = StandardScaler()
-# scaler.fit(train.drop('id', axis = 1))
-# train = pd.DataFrame(imp.transform(train), columns = train.columns)
-
-#%%
-cat_recode = {1 : 'functional',
-              2 : 'non functional',
-              3 : 'functional needs repair'}
 
 #%% model 1
 
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.model_selection import cross_val_score
+#rf_train = train.drop(['id'], axis = 1)
+#rf_vals = train_labels.status_group.map(cat_recode)
 
 rf_train = train.drop(['id'], axis = 1)
-rf_vals = train_labels.status_group.map(cat_recode)
-rf = RandomForestClassifier(max_depth = 20, random_state = 23456)
+rf_vals = train_labels.status_group
 
+#%% rf
+rf = RandomForestClassifier(max_features = 9, max_depth = 20, random_state = 23456)
 cvs = cross_val_score(rf, rf_train, rf_vals, scoring = 'accuracy', cv = 5)
 print(cvs)
+print('Mean Accuracy : {}'.format(np.mean(cvs).round(6)))
 #array([0.81372054, 0.81094276, 0.81405724, 0.80968013, 0.81220539]) # added population and amount_tsh
 #array([0.81372054, 0.80968013, 0.81498316, 0.81144781, 0.81127946]) # added quantity_enough flag. Modest improvement
 #array([0.81388889, 0.80951178, 0.81531987, 0.80816498, 0.81195286]) # added month_recorded, Modest improvement
@@ -150,7 +147,7 @@ print(cvs)
 #array([0.81776094, 0.81069024, 0.81430976, 0.81144781, 0.81271044]) # bucketized funder a bit, modest improvement
 #array([0.81734007, 0.81380471, 0.81464646, 0.80984848, 0.80799663]) # optimized xgb
 
-rf.fit(rf_train, rf_vals)
+#rf.fit(rf_train, rf_vals)
 
 #%% feature importance
 # feature_importances = pd.DataFrame(rf.feature_importances_,
@@ -161,20 +158,37 @@ rf.fit(rf_train, rf_vals)
 # print(feature_importances)
 
 
+
 #%% boosting
-from sklearn.ensemble import GradientBoostingClassifier
 
-gbc = GradientBoostingClassifier(random_state = 23456,
-                                 max_depth=10
-                                 )
+gbc = GradientBoostingClassifier(init = RandomForestClassifier(max_depth = 20),
+                                  subsample = .85,
+                                  n_iter_no_change = 10,
+                                  n_estimators=(1000),
+                                  learning_rate=(.25),
+                                  random_state=(23456))
 
-cvs = cross_val_score(gbc, rf_train, rf_vals, scoring = 'accuracy', cv = 5)
+cvs = cross_val_score(gbc, rf_train, rf_vals, scoring = 'accuracy', cv = 5, n_jobs = -1)
+
 print(cvs)
+print('Mean Accuracy : {}'.format(np.mean(cvs).round(6)))
+# [0.81254209 0.80858586 0.80867003 0.80589226 0.80858586] # md 10
+# Mean Accuracy : 0.808855
+# [0.81464646 0.80968013 0.81464646 0.80782828 0.80681818] # md 10 and subsample .85
+# Mean Accuracy : 0.810724
+# [0.81203704 0.80698653 0.80909091 0.80521886 0.80606061] # md 10, subsample .85 and 500 estimators: actually worse
+# Mean Accuracy : 0.807879
 
 #%%
-from xgboost import XGBClassifier
-from sklearn.model_selection import RandomizedSearchCV
-from scipy.stats import reciprocal, uniform
+bag = BaggingClassifier(n_estimators = 500,
+                        n_jobs = -1,
+                        max_samples = .85,
+                        oob_score = (True),
+                        random_state=(23456),
+                        max_features=(.7)
+                        )
+
+#%%
 
 xgb = XGBClassifier(objective = 'multi:softmax',
                     random_state = 23456)
@@ -193,86 +207,64 @@ best_xgb_model = xgb_optimized.fit(rf_train, rf_vals)
 #%%
 best_xgb_model.best_estimator_.get_params()
 best_xgb_model.best_score_
-cross_val_score(xgb, rf_train, rf_vals, scoring = 'accuracy', cv = 5)
+cross_val_score(xgb, rf_train, rf_vals, scoring = 'accuracy', cv = 5, n_jobs = -1)
 
 #%% optimized params for xgb
-xgb_params =  {'objective': 'multi:softprob',
-  'base_score': 0.5,
-  'booster': 'gbtree',
-  'colsample_bylevel': 1,
-  'colsample_bynode': 1,
-  'colsample_bytree': 1,
-  'gamma': 0.029521058580772683,
-  'gpu_id': -1,
-  'importance_type': 'gain',
-  'interaction_constraints': '',
-  'learning_rate': 0.23,
-  'max_delta_step': 0,
-  'max_depth': 15,
-  'min_child_weight': 15,
-  'missing': np.nan,
-  'monotone_constraints': '()',
-  'n_estimators': 100,
-  'n_jobs': 0,
-  'num_parallel_tree': 1,
-  'random_state': 23456,
-  'reg_alpha': 0,
-  'reg_lambda': 1,
-  'scale_pos_weight': None,
-  'subsample': 1,
-  'tree_method': 'exact',
-  'validate_parameters': 1,
-  'verbosity': None}
 
-xgb_params_upd = {'objective': 'multi:softprob',
- 'base_score': 0.5,
- 'booster': 'gbtree',
- 'colsample_bylevel': 1,
- 'colsample_bynode': 1,
- 'colsample_bytree': 1,
+xgb_params_upd = {'objective': 'multi:softmax',
  'gamma': 0.001369048068388758,
- 'gpu_id': -1,
- 'importance_type': 'gain',
- 'interaction_constraints': '',
- 'learning_rate': 0.11,
- 'max_delta_step': 10,
+ 'eta': 0.11,
  'max_depth': 15,
  'min_child_weight': 9,
- 'missing': np.nan,
- 'monotone_constraints': '()',
- 'n_estimators': 100,
- 'n_jobs': 0,
- 'num_parallel_tree': 1,
- 'random_state': 23456,
- 'reg_alpha': 0,
- 'reg_lambda': 1,
- 'scale_pos_weight': None,
- 'subsample': 1,
- 'tree_method': 'exact',
- 'validate_parameters': 1,
- 'verbosity': None}
+ 'num_class' : 4,
+ 'subsample' : .85,
+ 'colsample_bytree' : .9
+ }
 #xgb.fit(rf_train, rf_vals)
 #%% xgb 2
-from xgboost import XGBClassifier
 
 xgb = XGBClassifier(**xgb_params_upd)
-cross_val_score(xgb, rf_train, rf_vals, scoring = 'accuracy', cv = 5)
+cross_val_score(xgb, rf_train, rf_vals, scoring = 'accuracy', cv = 5, n_jobs = -1)
 
 #%% stack attempt 
 
-from sklearn.ensemble import StackingClassifier
+# best model to date
+# estimators = [
+#     ('rf', RandomForestClassifier(max_depth = 20, random_state = 23456)),
+#     ('xgb', XGBClassifier(**xgb_params_upd)),
+#     ('gbc', GradientBoostingClassifier(random_state = 23456, max_depth = 10))
+#     ]
+
 estimators = [
-    ('rf', RandomForestClassifier(max_depth = 20, random_state = 23456)),
+    ('rf', RandomForestClassifier(max_depth = 20, max_features = 9, random_state = 23456)),
     ('xgb', XGBClassifier(**xgb_params_upd)),
-    ('gbc', GradientBoostingClassifier(random_state = 23456, max_depth = 10))
+    ('gbc', GradientBoostingClassifier(init = RandomForestClassifier(max_depth = 20, random_state = 45678),
+                                  subsample = .85,
+                                  n_iter_no_change = 10,
+                                  n_estimators=(1000),
+                                  learning_rate=(.25),
+                                  random_state=(23456))),
+      ('bag', BaggingClassifier(n_estimators = 500,
+                        n_jobs = -1,
+                        max_samples = .85,
+                        oob_score = (True),
+                        random_state=(23456),
+                        max_features=(.7)))
     ]
 #%%
+from sklearn.linear_model import LogisticRegression
 
-clf = StackingClassifier(estimators)
+clf = StackingClassifier(estimators, final_estimator = LogisticRegression(max_iter = 1000), cv = 5, n_jobs = -1)
 clf.fit(rf_train, rf_vals)
 
-cvs = cross_val_score(clf, rf_train, rf_vals, scoring = 'accuracy', cv = 5)
+cvs = cross_val_score(clf, rf_train, rf_vals, scoring = 'accuracy', cv = 5, n_jobs = -1)
 print(cvs)
+print('Mean Accuracy : {}'.format(np.mean(cvs).round(6)))
+
+#%%
+cvs = cross_val_score(gbc2, rf_train, rf_vals, scoring = 'accuracy', cv = 5, n_jobs = -1)
+print(cvs)
+print('Mean Accuracy : {}'.format(np.mean(cvs).round(6)))
 
  #%% generate rf submission
 
@@ -290,17 +282,7 @@ test[['id', 'status_group']].to_csv("xgb_preds_md15_mcw3_etapt1.csv", index = Fa
 # scored .8154
 
 test['status_group'] = clf.predict(test.drop('id', axis = 1))
-test[['id', 'status_group']].to_csv("rf_xgb_gbc_ensemble2.csv", index = False)
-
-#%%% svc sub
-test = targ_enc.transform(test)
-test = pd.DataFrame(imp.transform(test), columns = test.columns)
-test['construction_year'] = test['construction_year'].round(0)
-test['permit'] = test['permit'].round(0)
-scaled = scaler.transform(test.drop('id', axis = 1))
-
-test['status_group'] = best_model.predict(scaled)
-
 test['status_group'] = test.status_group.map(cat_recode)
-test[['id', 'status_group']].to_csv("svm_preds_optmizedCandGamma.csv", index = False)
-# scored .7908
+test[['id', 'status_group']].to_csv("gbc_init_with_rf_xgb_gbc_bag_ensemble_logreg_final_opt_vars.csv", index = False)
+
+
