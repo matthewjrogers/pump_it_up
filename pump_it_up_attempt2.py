@@ -13,11 +13,11 @@ import category_encoders as ce
 
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
-from sklearn.model_selection import RandomizedSearchCV, GridSearchCV
+#from sklearn.model_selection import RandomizedSearchCV, GridSearchCV
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier, BaggingClassifier, StackingClassifier
 from sklearn.model_selection import cross_val_score
 from xgboost import XGBClassifier
-from scipy.stats import reciprocal
+#from scipy.stats import reciprocal
 
 #%% read data
 train = pd.read_csv('train_values.csv')
@@ -131,21 +131,25 @@ train['permit'] = train['permit'].round(0)
 #rf_train = train.drop(['id'], axis = 1)
 #rf_vals = train_labels.status_group.map(cat_recode)
 
-rf_train = train.drop(['id'], axis = 1)
-rf_vals = train_labels.status_group
+#rf_train = train.drop(['id'], axis = 1)
+#rf_vals = train_labels.status_group
 
 #%% rf
-rf = RandomForestClassifier(max_features = 9, max_depth = 20, random_state = 23456)
+rf = RandomForestClassifier(max_features = 9, max_depth = 20, random_state = 45678)
 cvs = cross_val_score(rf, rf_train, rf_vals, scoring = 'accuracy', cv = 5)
 print(cvs)
 print('Mean Accuracy : {}'.format(np.mean(cvs).round(6)))
-#array([0.81372054, 0.81094276, 0.81405724, 0.80968013, 0.81220539]) # added population and amount_tsh
-#array([0.81372054, 0.80968013, 0.81498316, 0.81144781, 0.81127946]) # added quantity_enough flag. Modest improvement
-#array([0.81388889, 0.80951178, 0.81531987, 0.80816498, 0.81195286]) # added month_recorded, Modest improvement
-#array([0.81632997, 0.81102694, 0.81329966, 0.81085859, 0.81161616]) # added time diff since recorded, generally better
-#array([0.81776094, 0.81052189, 0.81355219, 0.80976431, 0.81565657]) # recoded government installers, modest improvement in most folds
-#array([0.81776094, 0.81069024, 0.81430976, 0.81144781, 0.81271044]) # bucketized funder a bit, modest improvement
-#array([0.81734007, 0.81380471, 0.81464646, 0.80984848, 0.80799663]) # optimized xgb
+# random state 23456, part of best model
+# [0.81338384 0.80951178 0.81094276 0.80841751 0.81026936]
+# Mean Accuracy : 0.810505
+
+# rs 45678 up in folds 1 and 3
+# [0.81574074 0.80808081 0.81254209 0.80698653 0.80791246]
+# Mean Accuracy : 0.810253
+
+# rs 56789, up in folds 2,3
+# [0.81262626 0.81069024 0.81329966 0.80538721 0.80909091]
+# Mean Accuracy : 0.810219
 
 #rf.fit(rf_train, rf_vals)
 
@@ -229,42 +233,36 @@ cross_val_score(xgb, rf_train, rf_vals, scoring = 'accuracy', cv = 5, n_jobs = -
 #%% stack attempt 
 
 # best model to date
-# estimators = [
-#     ('rf', RandomForestClassifier(max_depth = 20, random_state = 23456)),
-#     ('xgb', XGBClassifier(**xgb_params_upd)),
-#     ('gbc', GradientBoostingClassifier(random_state = 23456, max_depth = 10))
-#     ]
-
 estimators = [
-    ('rf', RandomForestClassifier(max_depth = 20, max_features = 9, random_state = 23456)),
+    ('rf1', RandomForestClassifier(max_depth = 20, max_features = 9, random_state = 23456)),
+    ('rf2', RandomForestClassifier(max_depth = 20, max_features = 9, random_state = 45678)),
+    ('rf3', RandomForestClassifier(max_depth = 20, max_features = 9, random_state = 56789)),
     ('xgb', XGBClassifier(**xgb_params_upd)),
     ('gbc', GradientBoostingClassifier(init = RandomForestClassifier(max_depth = 20, random_state = 45678),
                                   subsample = .85,
                                   n_iter_no_change = 10,
-                                  n_estimators=(1000),
-                                  learning_rate=(.25),
-                                  random_state=(23456))),
+                                  n_estimators = 1000,
+                                  learning_rate = .25,
+                                  random_state = 23456)),
       ('bag', BaggingClassifier(n_estimators = 500,
-                        n_jobs = -1,
+                        #n_jobs = -1,
                         max_samples = .85,
-                        oob_score = (True),
-                        random_state=(23456),
-                        max_features=(.7)))
+                        oob_score = True,
+                        random_state = 23456,
+                        max_features = .7))
     ]
 #%%
 from sklearn.linear_model import LogisticRegression
 
-clf = StackingClassifier(estimators, final_estimator = LogisticRegression(max_iter = 1000), cv = 5, n_jobs = -1)
-clf.fit(rf_train, rf_vals)
+clf = StackingClassifier(estimators, final_estimator = LogisticRegression(max_iter = 1000), cv = 5)
+clf.fit(train.drop('id', axis = 1), train_labels.status_group)
 
-cvs = cross_val_score(clf, rf_train, rf_vals, scoring = 'accuracy', cv = 5, n_jobs = -1)
+cvs = cross_val_score(clf, train.drop('id', axis = 1), train_labels.status_group, scoring = 'accuracy', cv = 5
+                      #, n_jobs = -1
+                      )
 print(cvs)
 print('Mean Accuracy : {}'.format(np.mean(cvs).round(6)))
 
-#%%
-cvs = cross_val_score(gbc2, rf_train, rf_vals, scoring = 'accuracy', cv = 5, n_jobs = -1)
-print(cvs)
-print('Mean Accuracy : {}'.format(np.mean(cvs).round(6)))
 
  #%% generate rf submission
 
@@ -283,6 +281,6 @@ test[['id', 'status_group']].to_csv("xgb_preds_md15_mcw3_etapt1.csv", index = Fa
 
 test['status_group'] = clf.predict(test.drop('id', axis = 1))
 test['status_group'] = test.status_group.map(cat_recode)
-test[['id', 'status_group']].to_csv("gbc_init_with_rf_xgb_gbc_bag_ensemble_logreg_final_opt_vars.csv", index = False)
+test[['id', 'status_group']].to_csv("rf_xgb_gbc_bag_ensemble_logreg_final_opt_vars_addtl_rfs.csv", index = False)
 
 
